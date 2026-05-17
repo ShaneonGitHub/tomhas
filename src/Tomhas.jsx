@@ -1,10 +1,16 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useReducer, useRef } from "react";
 
-const BLANK = "\u2B1B";
+// ─── CONSTANTS ─────────────────────────────────────────────
+const BLANK = "⬛";
 const SZ = 56;
 const GAP = 5;
 const STEP = SZ + GAP;
 
+// Precomputed cell lists for each word (avoids allocation in hot path)
+const H_CELLS = [0, 1, 2].map(i => Array.from({ length: 5 }, (_, c) => [i * 2, c]));
+const V_CELLS = [0, 1, 2].map(i => Array.from({ length: 5 }, (_, r) => [r, i * 2]));
+
+// ─── PUZZLES (110, all verified against teanglann.ie) ──────
 const PUZZLES = [
   {"h":[{"word":"cosán","tr":"path"},{"word":"spéis","tr":"interest"},{"word":"airc","tr":"chest"}],"v":[{"word":"cósta","tr":"coast"},{"word":"spéir","tr":"sky"},{"word":"nasc","tr":"link"}]},
   {"h":[{"word":"casúr","tr":"hammer"},{"word":"spéis","tr":"interest"},{"word":"airc","tr":"chest"}],"v":[{"word":"cósta","tr":"coast"},{"word":"spéir","tr":"sky"},{"word":"rosc","tr":"eye"}]},
@@ -118,6 +124,7 @@ const PUZZLES = [
   {"h":[{"word":"spéis","tr":"interest"},{"word":"sásta","tr":"happy"},{"word":"réal","tr":"coin"}],"v":[{"word":"sásar","tr":"saucer"},{"word":"éasca","tr":"easy"},{"word":"seas","tr":"stand"}]},
 ];
 
+// ─── PURE FUNCTIONS ────────────────────────────────────────
 
 function pad(w) {
   const l = w.toLowerCase().split("");
@@ -164,7 +171,7 @@ function scramble(sol) {
     }
     const s = sh.filter((ch, i) => !eq(ch, lets[i])).length;
     if (s > bestS) { best = sh; bestS = s; }
-    if (s >= lets.length - 1) break;
+    if (s >= lets.length - 2) break; // #5: exit earlier
   }
   pos.forEach(([r, c], i) => { g[r][c] = best[i]; });
   return g;
@@ -194,37 +201,43 @@ function calcMinSwaps(grid, sol) {
   return n - cyc;
 }
 
-function ufCount(grid, sol, cells, ch) {
-  let n = 0, p = 0;
-  for (const [r, c] of cells) {
-    if (eq(sol[r][c], ch)) n++;
-    if (eq(sol[r][c], ch) && eq(grid[r][c], ch)) p++;
-  }
-  return n - p;
-}
-
-function mpRank(grid, sol, cells, ch, tr, tc) {
-  let rank = 0;
-  for (const [r, c] of cells) {
-    if (r === tr && c === tc) return rank;
-    if (eq(grid[r][c], ch) && !eq(grid[r][c], sol[r][c])) rank++;
-  }
-  return rank;
-}
-
+// #6: cache ufCount result instead of calling twice
 function tileStatus(grid, sol, r, c) {
   if (!isActive(r, c)) return "off";
   const ch = grid[r][c];
   if (!ch || ch === BLANK) return ch === BLANK ? "blank" : "off";
   if (eq(ch, sol[r][c])) return "correct";
+
   let found = false;
   if (r % 2 === 0) {
-    const cells = Array.from({ length: 5 }, (_, cc) => [r, cc]);
-    if (ufCount(grid, sol, cells, ch) > 0 && mpRank(grid, sol, cells, ch, r, c) < ufCount(grid, sol, cells, ch)) found = true;
+    const cells = H_CELLS[r / 2];
+    let needed = 0, placed = 0, rank = 0;
+    for (const [cr, cc] of cells) {
+      if (eq(sol[cr][cc], ch)) { needed++; if (eq(grid[cr][cc], ch)) placed++; }
+    }
+    const uf = needed - placed;
+    if (uf > 0) {
+      for (const [cr, cc] of cells) {
+        if (cr === r && cc === c) break;
+        if (eq(grid[cr][cc], ch) && !eq(grid[cr][cc], sol[cr][cc])) rank++;
+      }
+      if (rank < uf) found = true;
+    }
   }
   if (!found && c % 2 === 0) {
-    const cells = Array.from({ length: 5 }, (_, rr) => [rr, c]);
-    if (ufCount(grid, sol, cells, ch) > 0 && mpRank(grid, sol, cells, ch, r, c) < ufCount(grid, sol, cells, ch)) found = true;
+    const cells = V_CELLS[c / 2];
+    let needed = 0, placed = 0, rank = 0;
+    for (const [cr, cc] of cells) {
+      if (eq(sol[cr][cc], ch)) { needed++; if (eq(grid[cr][cc], ch)) placed++; }
+    }
+    const uf = needed - placed;
+    if (uf > 0) {
+      for (const [cr, cc] of cells) {
+        if (cr === r && cc === c) break;
+        if (eq(grid[cr][cc], ch) && !eq(grid[cr][cc], sol[cr][cc])) rank++;
+      }
+      if (rank < uf) found = true;
+    }
   }
   return found ? "misplaced" : "wrong";
 }
@@ -234,11 +247,58 @@ function wordDone(g, s, cells) {
 }
 
 const BG = { correct: "#4a8b3f", misplaced: "#b8942e", wrong: "#3b3b50", blank: "#1c1c2e" };
-const hasFada = (ch) => "\u00e1\u00e9\u00ed\u00f3\u00fa".includes(ch);
+const hasFada = (ch) => "áéíóú".includes(ch);
+
+// ─── SMALL COMPONENTS ──────────────────────────────────────
 
 function FadaDot({ small }) {
-  return <div style={{ position: "absolute", bottom: small ? 2 : 4, right: small ? 3 : 5, width: small ? 3 : 5, height: small ? 3 : 5, borderRadius: "50%", background: "#f5d67a", opacity: 0.8 }} />;
+  return (
+    <div
+      role="presentation"
+      style={{
+        position: "absolute", bottom: small ? 2 : 4, right: small ? 3 : 5,
+        width: small ? 3 : 5, height: small ? 3 : 5,
+        borderRadius: "50%", background: "#f5d67a", opacity: 0.8,
+      }}
+    />
+  );
 }
+
+function Medal({ earned, emoji, color }) {
+  return (
+    <div
+      role="img"
+      aria-label={earned ? "Medal earned" : "Medal locked"}
+      style={{
+        width: 34, height: 34, borderRadius: "50%",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: earned ? 20 : 15,
+        background: earned ? `radial-gradient(circle, ${color}33, ${color}11)` : "rgba(255,255,255,0.03)",
+        border: `2px solid ${earned ? color : "rgba(255,255,255,0.08)"}`,
+        transition: "all 0.5s",
+        filter: earned ? "none" : "grayscale(1) opacity(0.3)",
+        transform: earned ? "scale(1)" : "scale(0.9)",
+      }}
+    >
+      {emoji}
+    </div>
+  );
+}
+
+function ProgressBar({ progress, color, earned }) {
+  return (
+    <div style={{ width: 20, height: 3, borderRadius: 2, background: "rgba(255,255,255,0.06)", overflow: "hidden", position: "relative" }}>
+      <div style={{
+        position: "absolute", left: 0, top: 0, bottom: 0,
+        width: `${Math.max(0, Math.min(progress, 2)) / 2 * 100}%`,
+        background: earned ? color : "rgba(255,255,255,0.15)",
+        borderRadius: 2, transition: "width 0.5s",
+      }} />
+    </div>
+  );
+}
+
+// ─── MAIN COMPONENT ────────────────────────────────────────
 
 export default function Tomhas() {
   const [puz, setPuz] = useState(null);
@@ -260,6 +320,7 @@ export default function Tomhas() {
   const toastKey = useRef(0);
   const gridRef = useRef(null);
   const dragRef = useRef(null);
+  const lastPuzzleIdx = useRef(-1); // #4: prevent repeats
   const R = useRef({});
   R.current = { grid, sol, puz, done, swaps, won, lost, sel, hints };
 
@@ -276,17 +337,11 @@ export default function Tomhas() {
     let jst = null;
     p.h.forEach((w, i) => {
       const k = "h" + i;
-      if (!nd.has(k) && wordDone(g, s, Array.from({ length: 5 }, (_, c) => [i * 2, c]))) {
-        nd.add(k);
-        jst = w;
-      }
+      if (!nd.has(k) && wordDone(g, s, H_CELLS[i])) { nd.add(k); jst = w; }
     });
     p.v.forEach((w, i) => {
       const k = "v" + i;
-      if (!nd.has(k) && wordDone(g, s, Array.from({ length: 5 }, (_, r) => [r, i * 2]))) {
-        nd.add(k);
-        jst = w;
-      }
+      if (!nd.has(k) && wordDone(g, s, V_CELLS[i])) { nd.add(k); jst = w; }
     });
     if (nd.size > d.size) {
       setDone(nd);
@@ -305,7 +360,7 @@ export default function Tomhas() {
     const ng = g.map(row => [...row]);
     ng[fr][fc] = g[tr][tc];
     ng[tr][tc] = g[fr][fc];
-    setBump(new Set([fr + "," + fc, tr + "," + tc]));
+    setBump(new Set([`${fr},${fc}`, `${tr},${tc}`]));
     setTimeout(() => setBump(new Set()), 300);
     setGrid(ng);
     setSel(null);
@@ -336,8 +391,15 @@ export default function Tomhas() {
     doSwap(sl[0], sl[1], r, c);
   }, [doSwap]);
 
+  // #4: prevent same puzzle twice in a row
   const start = useCallback(() => {
-    const p = PUZZLES[Math.floor(Math.random() * PUZZLES.length)];
+    let idx;
+    do {
+      idx = Math.floor(Math.random() * PUZZLES.length);
+    } while (idx === lastPuzzleIdx.current && PUZZLES.length > 1);
+    lastPuzzleIdx.current = idx;
+
+    const p = PUZZLES[idx];
     const s = buildSol(p);
     const scr = scramble(s);
     const opt = calcMinSwaps(scr, s);
@@ -360,6 +422,7 @@ export default function Tomhas() {
 
   useEffect(() => { start(); }, [start]);
 
+  // #3: Fixed hint - properly swaps letters instead of creating from thin air
   const handleHint = useCallback(() => {
     const { grid: g, sol: s, puz: p, done: d, won: w, lost: l, hints: h } = R.current;
     if (w || l || !g || !s || h <= 0) return;
@@ -369,23 +432,27 @@ export default function Tomhas() {
         if (isActive(r, c) && g[r][c] && g[r][c] !== BLANK && !eq(g[r][c], s[r][c]))
           wrong.push([r, c]);
     if (!wrong.length) return;
-    const [tr, tc] = wrong[Math.floor(Math.random() * wrong.length)];
-    const needed = s[tr][tc];
-    let fr = -1, fc = -1;
-    for (let r = 0; r < 5; r++)
-      for (let c = 0; c < 5; c++)
-        if (isActive(r, c) && eq(g[r][c], needed) && !eq(g[r][c], s[r][c]) && !(r === tr && c === tc)) {
-          fr = r; fc = c; break;
-        }
-    const ng = g.map(row => [...row]);
-    if (fr >= 0) {
-      ng[fr][fc] = ng[tr][tc];
-      ng[tr][tc] = needed;
-      setBump(new Set([tr + "," + tc, fr + "," + fc]));
-    } else {
-      ng[tr][tc] = needed;
-      setBump(new Set([tr + "," + tc]));
+
+    // Find a cell whose needed letter exists elsewhere in a wrong position
+    let targetR = -1, targetC = -1, sourceR = -1, sourceC = -1;
+    const shuffled = [...wrong].sort(() => Math.random() - 0.5);
+    for (const [tr, tc] of shuffled) {
+      const needed = s[tr][tc];
+      for (let r = 0; r < 5; r++)
+        for (let c = 0; c < 5; c++)
+          if (isActive(r, c) && eq(g[r][c], needed) && !eq(g[r][c], s[r][c]) && !(r === tr && c === tc)) {
+            targetR = tr; targetC = tc; sourceR = r; sourceC = c;
+            break;
+          }
+      if (sourceR >= 0) break;
     }
+
+    if (sourceR < 0) return; // No valid hint possible
+
+    const ng = g.map(row => [...row]);
+    ng[sourceR][sourceC] = ng[targetR][targetC];
+    ng[targetR][targetC] = s[targetR][targetC];
+    setBump(new Set([`${targetR},${targetC}`, `${sourceR},${sourceC}`]));
     setTimeout(() => setBump(new Set()), 300);
     setGrid(ng);
     setSel(null);
@@ -473,14 +540,14 @@ export default function Tomhas() {
   }
 
   if (!puz || !grid || !sol) {
-    return <div style={S.loading}><p>Ag l\u00f3d\u00e1il...</p></div>;
+    return <div style={S.loading}><p>Ag lódáil...</p></div>;
   }
 
   const count = done.size;
   const dragR = ghostPos ? ghostPos.r : -1;
   const dragC = ghostPos ? ghostPos.c : -1;
 
-  // Ghost tile rendering
+  // #1: Fixed ghost - position: fixed only, no duplicate
   let ghostEl = null;
   if (ghostPos && grid[ghostPos.r]) {
     const ch = grid[ghostPos.r][ghostPos.c];
@@ -489,14 +556,16 @@ export default function Tomhas() {
       const bg = BG[st] || "#3b3b50";
       ghostEl = (
         <div style={{
-          position: "fixed", left: ghostPos.x - SZ / 2, top: ghostPos.y - SZ / 2,
-          width: SZ, height: SZ, display: "flex", alignItems: "center", justifyContent: "center",
+          position: "fixed",
+          left: ghostPos.x - SZ / 2, top: ghostPos.y - SZ / 2,
+          width: SZ, height: SZ,
+          display: "flex", alignItems: "center", justifyContent: "center",
           background: bg, borderRadius: 10, border: "2.5px solid #f0e6cc",
           fontSize: 23, fontWeight: 700, fontFamily: "'DM Sans', sans-serif",
           color: "#fff", textTransform: "uppercase",
           boxShadow: "0 8px 32px rgba(0,0,0,0.5), 0 0 20px rgba(240,230,204,0.2)",
-          pointerEvents: "none", zIndex: 100, transform: "scale(1.1) rotate(2deg)", userSelect: "none",
-          position: "relative",
+          pointerEvents: "none", zIndex: 100,
+          transform: "scale(1.1) rotate(2deg)", userSelect: "none",
         }}>
           {ch.toUpperCase()}
           {hasFada(ch) && <FadaDot />}
@@ -505,15 +574,26 @@ export default function Tomhas() {
     }
   }
 
+  // End screen cell-to-word lookup
+  const cellWords = {};
+  if (won || lost) {
+    puz.h.forEach((w, i) => { for (let c = 0; c < 5; c++) { const k = `${i * 2},${c}`; if (!cellWords[k]) cellWords[k] = []; cellWords[k].push(w); } });
+    puz.v.forEach((w, i) => { for (let r = 0; r < 5; r++) { const k = `${r},${i * 2}`; if (!cellWords[k]) cellWords[k] = []; cellWords[k].push(w); } });
+  }
+
+  const medal = count >= 6 ? "🥇" : count >= 4 ? "🥈" : count >= 2 ? "🥉" : "💪";
+  const medalLabel = count >= 6 ? "ÓR" : count >= 4 ? "AIRGEAD" : count >= 2 ? "CRÉ-UMHA" : "";
+  const medalColor = count >= 6 ? "#ffd700" : count >= 4 ? "#c0c0c0" : count >= 2 ? "#cd7f32" : "#7a7a60";
+
   return (
-    <div style={S.root}>
-      <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
+    <div style={S.root} role="main" aria-label="Tomhas - Irish word puzzle game">
       <div style={S.topBar} />
       <h1 style={S.title}>TOMHAS</h1>
       <div style={S.subtitle}>CLUICHE FOCAL AS GAEILGE</div>
 
+      {/* Controls */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
-        <div style={S.swapBox}>
+        <div style={S.swapBox} aria-label={"Swaps remaining: " + swaps}>
           <span style={S.swapLabel}>Babhtaí</span>
           <span style={{ ...S.swapNum, color: swaps <= 2 ? "#d94444" : swaps <= optimal ? "#b8942e" : "#4a8b3f" }}>{swaps}</span>
         </div>
@@ -521,65 +601,68 @@ export default function Tomhas() {
           <div>Is fearr</div>
           <div style={{ fontSize: 16, fontWeight: 700, color: "#7a7a60" }}>{optimal}</div>
         </div>
-        <button onClick={handleHint}
+        <button
+          onClick={handleHint}
+          disabled={hints <= 0 || won || lost}
+          aria-label={"Use hint, " + hints + " remaining"}
           style={{ ...S.hintBtn, opacity: hints <= 0 ? 0.3 : 1, cursor: hints <= 0 ? "default" : "pointer" }}
-          onMouseEnter={e => { if (hints > 0) e.target.style.background = "rgba(184,148,46,0.25)"; }}
-          onMouseLeave={e => { e.target.style.background = "rgba(184,148,46,0.12)"; }}
+          onMouseEnter={(e) => { if (hints > 0) e.target.style.background = "rgba(184,148,46,0.25)"; }}
+          onMouseLeave={(e) => { e.target.style.background = "rgba(184,148,46,0.12)"; }}
         >{"💡 " + hints}</button>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+      {/* Medal tracker */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }} role="progressbar" aria-valuenow={count} aria-valuemin={0} aria-valuemax={6} aria-label={"Words found: " + count + " of 6"}>
         {[{ n: 2, e: "🥉", col: "#cd7f32" }, { n: 4, e: "🥈", col: "#c0c0c0" }, { n: 6, e: "🥇", col: "#ffd700" }].map((m, i) => {
           const earned = count >= m.n;
           const prog = Math.min(count - i * 2, 2);
           return (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <div style={{
-                width: 34, height: 34, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: earned ? 20 : 15,
-                background: earned ? "radial-gradient(circle, " + m.col + "33, " + m.col + "11)" : "rgba(255,255,255,0.03)",
-                border: "2px solid " + (earned ? m.col : "rgba(255,255,255,0.08)"),
-                transition: "all 0.5s", filter: earned ? "none" : "grayscale(1) opacity(0.3)",
-                transform: earned ? "scale(1)" : "scale(0.9)",
-              }}>{m.e}</div>
-              {i < 2 && (
-                <div style={{ width: 20, height: 3, borderRadius: 2, background: "rgba(255,255,255,0.06)", overflow: "hidden", position: "relative" }}>
-                  <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: (Math.max(0, Math.min(prog, 2)) / 2 * 100) + "%", background: earned ? m.col : "rgba(255,255,255,0.15)", borderRadius: 2, transition: "width 0.5s" }} />
-                </div>
-              )}
+              <Medal earned={earned} emoji={m.e} color={m.col} />
+              {i < 2 && <ProgressBar progress={prog} color={m.col} earned={earned} />}
             </div>
           );
         })}
         <span style={{ fontSize: 11, color: "#5a5a48", fontFamily: "'DM Sans', sans-serif", marginLeft: 4 }}>{count}/6</span>
       </div>
 
+      {/* Toast */}
       {toast && (
-        <div key={toast.key} style={S.toast}>
+        <div key={toast.key} style={S.toast} role="alert">
           <div style={S.toastWord}>{toast.word.toUpperCase()}</div>
           <div style={S.toastTr}>{toast.tr}</div>
         </div>
       )}
 
-      <div ref={gridRef} style={{ display: "grid", gridTemplateColumns: "repeat(5, " + SZ + "px)", gridTemplateRows: "repeat(5, " + SZ + "px)", gap: GAP, marginBottom: 16, position: "relative", touchAction: "none" }}>
-        {Array.from({ length: 25 }).map(function(_, idx) {
-          var r = Math.floor(idx / 5);
-          var c = idx % 5;
+      {/* Grid */}
+      <div
+        ref={gridRef}
+        role="grid"
+        aria-label="Word puzzle grid"
+        style={{ display: "grid", gridTemplateColumns: `repeat(5, ${SZ}px)`, gridTemplateRows: `repeat(5, ${SZ}px)`, gap: GAP, marginBottom: 16, position: "relative", touchAction: "none" }}
+      >
+        {Array.from({ length: 25 }).map((_, idx) => {
+          const r = Math.floor(idx / 5);
+          const c = idx % 5;
           if (!isActive(r, c) || !grid[r][c]) return <div key={idx} style={{ width: SZ, height: SZ }} />;
-          var ch = grid[r][c];
-          var bl = ch === BLANK;
-          var st = tileStatus(grid, sol, r, c);
-          var isSel = sel && sel[0] === r && sel[1] === c;
-          var isBump = bump.has(r + "," + c);
-          var isCorr = st === "correct";
-          var isDrag = dragR === r && dragC === c;
-          var isDrop = dropCell === (r + "," + c);
-          var canDrag = !bl && !isCorr && !won && !lost;
-          var bg = BG[st] || "transparent";
+          const ch = grid[r][c];
+          const bl = ch === BLANK;
+          const st = tileStatus(grid, sol, r, c);
+          const isSel = sel && sel[0] === r && sel[1] === c;
+          const isBump = bump.has(`${r},${c}`);
+          const isCorr = st === "correct";
+          const isDrag = dragR === r && dragC === c;
+          const isDrop = dropCell === `${r},${c}`;
+          const canDrag = !bl && !isCorr && !won && !lost;
+          const bg = BG[st] || "transparent";
 
           return (
-            <div key={idx}
-              onMouseDown={function(e) { e.preventDefault(); if (canDrag) beginDrag(r, c, e.clientX, e.clientY); }}
-              onTouchStart={function(e) { if (canDrag) { e.preventDefault(); var t = e.touches[0]; beginDrag(r, c, t.clientX, t.clientY); } }}
+            <div
+              key={idx}
+              role="gridcell"
+              aria-label={bl ? "blank" : ch.toUpperCase() + (isCorr ? ", correct" : st === "misplaced" ? ", wrong position" : "")}
+              onMouseDown={(e) => { e.preventDefault(); if (canDrag) beginDrag(r, c, e.clientX, e.clientY); }}
+              onTouchStart={(e) => { if (canDrag) { e.preventDefault(); const t = e.touches[0]; beginDrag(r, c, t.clientX, t.clientY); } }}
               style={{
                 width: SZ, height: SZ, display: "flex", alignItems: "center", justifyContent: "center",
                 background: bg, borderRadius: 10,
@@ -603,109 +686,119 @@ export default function Tomhas() {
 
       {ghostEl}
 
+      {/* Word chips */}
       <div style={S.chips}>
-        {puz.h.map(function(w, i) {
-          var d = done.has("h" + i);
+        {puz.h.map((w, i) => {
+          const d = done.has("h" + i);
           return <div key={"h" + i} style={d ? S.chipDone : S.chip}>{"→ " + (d ? w.word.toUpperCase() + " (" + w.tr + ")" : "Sraith " + (i + 1))}</div>;
         })}
-        {puz.v.map(function(w, i) {
-          var d = done.has("v" + i);
-          return <div key={"v" + i} style={d ? S.chipDone : S.chip}>{"↓ " + (d ? w.word.toUpperCase() + " (" + w.tr + ")" : "Col\u00fan " + (i + 1))}</div>;
+        {puz.v.map((w, i) => {
+          const d = done.has("v" + i);
+          return <div key={"v" + i} style={d ? S.chipDone : S.chip}>{"↓ " + (d ? w.word.toUpperCase() + " (" + w.tr + ")" : "Colún " + (i + 1))}</div>;
         })}
       </div>
 
+      {/* Instructions */}
       <div style={S.help}>
-        <p style={{ margin: "0 0 4px" }}>Tarraing t\u00edl go dt\u00ed ceann eile, n\u00f3 br\u00faigh dh\u00e1 th\u00edl le babht\u00e1il.</p>
-        <p style={{ margin: 0, fontSize: 10, opacity: 0.7 }}>{"\u00e1 \u2260 a \u00b7 \u00e9 \u2260 e \u00b7 \u00ed \u2260 i \u00b7 \u00f3 \u2260 o \u00b7 \u00fa \u2260 u \u00b7 \u2B1B = sp\u00e1s folamh"}</p>
+        <p style={{ margin: "0 0 4px" }}>Tarraing tíl go dtí ceann eile, nó brúigh dhá thíl le babhtáil.</p>
+        <p style={{ margin: 0, fontSize: 10, opacity: 0.7 }}>á ≠ a · é ≠ e · í ≠ i · ó ≠ o · ú ≠ u · ⬛ = spás folamh</p>
       </div>
 
+      {/* Legend */}
       <div style={S.legend}>
-        {[{ bg: "#4a8b3f", t: "Ceart" }, { bg: "#b8942e", t: "\u00c1it mh\u00edcheart" }, { bg: "#3b3b50", t: "M\u00edcheart" }].map(function(x) {
-          return <div key={x.t} style={S.legendItem}><div style={{ width: 12, height: 12, borderRadius: 3, background: x.bg }} />{x.t}</div>;
-        })}
+        {[{ bg: "#4a8b3f", t: "Ceart" }, { bg: "#b8942e", t: "Áit mhícheart" }, { bg: "#3b3b50", t: "Mícheart" }].map((x) => (
+          <div key={x.t} style={S.legendItem}>
+            <div style={{ width: 12, height: 12, borderRadius: 3, background: x.bg }} />
+            {x.t}
+          </div>
+        ))}
       </div>
 
-      <button onClick={start} style={S.btn}
-        onMouseEnter={function(e) { e.target.style.background = "rgba(74,139,63,0.25)"; }}
-        onMouseLeave={function(e) { e.target.style.background = "rgba(74,139,63,0.12)"; }}
+      <button
+        onClick={start}
+        style={S.btn}
+        onMouseEnter={(e) => { e.target.style.background = "rgba(74,139,63,0.25)"; }}
+        onMouseLeave={(e) => { e.target.style.background = "rgba(74,139,63,0.12)"; }}
       >CLUICHE NUA</button>
 
-      {(won || lost) && (function() {
-        var medal = count >= 6 ? "🥇" : count >= 4 ? "🥈" : count >= 2 ? "🥉" : "💪";
-        var mL = count >= 6 ? "\u00d3R" : count >= 4 ? "AIRGEAD" : count >= 2 ? "CR\u00c9-UMHA" : "";
-        var mC = count >= 6 ? "#ffd700" : count >= 4 ? "#c0c0c0" : count >= 2 ? "#cd7f32" : "#7a7a60";
-        var G = 38;
-        var cw = {};
-        puz.h.forEach(function(w, i) { for (var c = 0; c < 5; c++) { var k = (i * 2) + "," + c; if (!cw[k]) cw[k] = []; cw[k].push(w); } });
-        puz.v.forEach(function(w, i) { for (var r = 0; r < 5; r++) { var k = r + "," + (i * 2); if (!cw[k]) cw[k] = []; cw[k].push(w); } });
-        var modalBg = won ? {} : { background: "linear-gradient(145deg, #1d1520, #251a1a)", border: "1px solid rgba(217,68,68,0.25)" };
+      {/* End screen */}
+      {(won || lost) && (
+        <div style={S.overlay} role="dialog" aria-label={won ? "You won!" : "Game over"}>
+          <div style={{ ...S.modal, ...(won ? {} : { background: "linear-gradient(145deg, #1d1520, #251a1a)", border: "1px solid rgba(217,68,68,0.25)" }), maxWidth: 380, padding: "28px 24px 32px" }}>
+            <div style={{ fontSize: 52, marginBottom: 2 }}>{medal}</div>
+            {medalLabel && <div style={{ fontSize: 12, fontFamily: "'DM Sans', sans-serif", color: medalColor, fontWeight: 700, letterSpacing: 2, marginBottom: 2 }}>{medalLabel}</div>}
+            <h2 style={{ fontSize: 26, margin: "4px 0 2px", color: won ? "#7cc96e" : count >= 2 ? medalColor : "#d94444", fontWeight: 700, fontFamily: "'Cormorant Garamond', serif" }}>
+              {won ? "Maith thú!" : count >= 2 ? "Iarracht mhaith!" : "Deireadh!"}
+            </h2>
+            <p style={{ fontSize: 12, color: "#7a7a60", margin: "0 0 14px", fontFamily: "'DM Sans', sans-serif" }}>
+              {count + "/6 focal · " + swaps + " babhtaí fágtha · is fearr: " + optimal}
+            </p>
 
-        return (
-          <div style={S.overlay}>
-            <div style={{ ...S.modal, ...modalBg, maxWidth: 380, padding: "28px 24px 32px" }}>
-              <div style={{ fontSize: 52, marginBottom: 2 }}>{medal}</div>
-              {mL && <div style={{ fontSize: 12, fontFamily: "'DM Sans', sans-serif", color: mC, fontWeight: 700, letterSpacing: 2, marginBottom: 2 }}>{mL}</div>}
-              <h2 style={{ fontSize: 26, margin: "4px 0 2px", color: won ? "#7cc96e" : count >= 2 ? mC : "#d94444", fontWeight: 700, fontFamily: "'Cormorant Garamond', serif" }}>
-                {won ? "Maith th\u00fa!" : count >= 2 ? "Iarracht mhaith!" : "Deireadh!"}
-              </h2>
-              <p style={{ fontSize: 12, color: "#7a7a60", margin: "0 0 14px", fontFamily: "'DM Sans', sans-serif" }}>
-                {count + "/6 focal \u00b7 " + swaps + " babht\u00e1\u00ed f\u00e1gtha \u00b7 is fearr: " + optimal}
-              </p>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, " + G + "px)", gridTemplateRows: "repeat(5, " + G + "px)", gap: 3, marginBottom: 10, justifyContent: "center" }}>
-                {Array.from({ length: 25 }).map(function(_, idx) {
-                  var r = Math.floor(idx / 5);
-                  var c = idx % 5;
-                  if (!isActive(r, c) || !sol[r][c]) return <div key={idx} style={{ width: G, height: G }} />;
-                  var ch = sol[r][c];
-                  var bl = ch === BLANK;
-                  var words = cw[r + "," + c] || [];
-                  return (
-                    <div key={idx}
-                      onClick={function() { if (words.length && !bl) showToast(words[0].word, words[0].tr); }}
-                      style={{
-                        width: G, height: G, display: "flex", alignItems: "center", justifyContent: "center",
-                        background: bl ? "#1c1c2e" : "#4a8b3f", borderRadius: 6,
-                        border: bl ? "1.5px dashed #2a2a3e" : "1.5px solid transparent",
-                        fontSize: 15, fontWeight: 700, fontFamily: "'DM Sans', sans-serif",
-                        color: bl ? "#2a2a3e" : "#fff", textTransform: "uppercase",
-                        cursor: bl ? "default" : "pointer", userSelect: "none", transition: "transform 0.15s", position: "relative",
-                      }}
-                      onMouseEnter={function(e) { if (!bl) e.currentTarget.style.transform = "scale(1.12)"; }}
-                      onMouseLeave={function(e) { e.currentTarget.style.transform = "scale(1)"; }}
-                    >
-                      {bl ? "" : ch.toUpperCase()}
-                      {hasFada(ch) && <FadaDot small />}
-                    </div>
-                  );
-                })}
-              </div>
-              <p style={{ fontSize: 10, color: "#5a5a48", margin: "0 0 14px", fontFamily: "'DM Sans', sans-serif", fontStyle: "italic" }}>
-                {"Br\u00faigh ar th\u00edl chun an t-aistri\u00fach\u00e1n a fheice\u00e1il"}
-              </p>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "center", marginBottom: 18 }}>
-                {[].concat(puz.h.map(function(w, i) { return { word: w.word, tr: w.tr, d: "\u2192", k: "h" + i }; }), puz.v.map(function(w, i) { return { word: w.word, tr: w.tr, d: "\u2193", k: "v" + i }; })).map(function(w) {
-                  return (
-                    <div key={w.k} style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontFamily: "'DM Sans', sans-serif", fontWeight: 600, background: "rgba(74,139,63,0.2)", color: "#7cc96e", border: "1px solid rgba(74,139,63,0.25)" }}>
-                      {w.d + " " + w.word.toUpperCase() + " "}<span style={{ color: "#5a5a48", fontWeight: 400 }}>{"(" + w.tr + ")"}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <button onClick={start} style={{ ...S.modalBtn, background: won ? "#4a8b3f" : count >= 2 ? "#b8942e" : "#d94444" }}>
-                {won ? "AR\u00cdS!" : "TRIAIL AR\u00cdS"}
-              </button>
+            {/* Solution grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 38px)", gridTemplateRows: "repeat(5, 38px)", gap: 3, marginBottom: 10, justifyContent: "center" }}>
+              {Array.from({ length: 25 }).map((_, idx) => {
+                const r = Math.floor(idx / 5);
+                const c = idx % 5;
+                if (!isActive(r, c) || !sol[r][c]) return <div key={idx} style={{ width: 38, height: 38 }} />;
+                const ch = sol[r][c];
+                const bl = ch === BLANK;
+                const words = cellWords[`${r},${c}`] || [];
+                return (
+                  <div
+                    key={idx}
+                    role="button"
+                    aria-label={bl ? "blank" : ch.toUpperCase() + (words.length ? ", " + words[0].tr : "")}
+                    onClick={() => { if (words.length && !bl) showToast(words[0].word, words[0].tr); }}
+                    style={{
+                      width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center",
+                      background: bl ? "#1c1c2e" : "#4a8b3f", borderRadius: 6,
+                      border: bl ? "1.5px dashed #2a2a3e" : "1.5px solid transparent",
+                      fontSize: 15, fontWeight: 700, fontFamily: "'DM Sans', sans-serif",
+                      color: bl ? "#2a2a3e" : "#fff", textTransform: "uppercase",
+                      cursor: bl ? "default" : "pointer", userSelect: "none",
+                      transition: "transform 0.15s", position: "relative",
+                    }}
+                    onMouseEnter={(e) => { if (!bl) e.currentTarget.style.transform = "scale(1.12)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; }}
+                  >
+                    {bl ? "" : ch.toUpperCase()}
+                    {hasFada(ch) && <FadaDot small />}
+                  </div>
+                );
+              })}
             </div>
-          </div>
-        );
-      })()}
+            <p style={{ fontSize: 10, color: "#5a5a48", margin: "0 0 14px", fontFamily: "'DM Sans', sans-serif", fontStyle: "italic" }}>
+              Brúigh ar thíl chun an t-aistriúchán a fheiceáil
+            </p>
 
-      <p style={S.footer}>{"Focail \u00f3 "}<span style={{ color: "#5a5a48" }}>teanglann.ie</span></p>
+            {/* Word list */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "center", marginBottom: 18 }}>
+              {[...puz.h.map((w, i) => ({ ...w, d: "→", k: "h" + i })), ...puz.v.map((w, i) => ({ ...w, d: "↓", k: "v" + i }))].map((w) => (
+                <div key={w.k} style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontFamily: "'DM Sans', sans-serif", fontWeight: 600, background: "rgba(74,139,63,0.2)", color: "#7cc96e", border: "1px solid rgba(74,139,63,0.25)" }}>
+                  {w.d + " " + w.word.toUpperCase() + " "}<span style={{ color: "#5a5a48", fontWeight: 400 }}>{"(" + w.tr + ")"}</span>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={start}
+              style={{ ...S.modalBtn, background: won ? "#4a8b3f" : count >= 2 ? "#b8942e" : "#d94444" }}
+            >
+              {won ? "ARÍS!" : "TRIAIL ARÍS"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <p style={S.footer}>Focail ó <span style={{ color: "#5a5a48" }}>teanglann.ie</span></p>
       <style>{"@keyframes toastIn{0%{opacity:0;transform:translate(-50%,-50%) scale(.85)}12%{opacity:1;transform:translate(-50%,-50%) scale(1)}80%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.92)}}"}</style>
     </div>
   );
 }
 
-var S = {
+// ─── STYLES ────────────────────────────────────────────────
+
+const S = {
   root: { minHeight: "100vh", background: "linear-gradient(160deg, #0d1117 0%, #151d2a 50%, #111b21 100%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "24px 12px 40px", fontFamily: "'Palatino Linotype', Georgia, serif", color: "#d4c9a8", position: "relative", overscrollBehavior: "none" },
   loading: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#111b21", color: "#d4c9a8", fontFamily: "Georgia, serif", fontSize: 18 },
   topBar: { position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "linear-gradient(90deg, #4a8b3f, #b8942e, #4a8b3f, #b8942e, #4a8b3f)", opacity: 0.7 },
@@ -715,7 +808,7 @@ var S = {
   swapLabel: { fontSize: 12, color: "#7a7a60", fontFamily: "'DM Sans', sans-serif" },
   swapNum: { fontSize: 24, fontWeight: 700, fontFamily: "'Cormorant Garamond', serif", minWidth: 30, textAlign: "center" },
   hintBtn: { padding: "8px 16px", borderRadius: 24, border: "1px solid rgba(184,148,46,0.35)", background: "rgba(184,148,46,0.12)", color: "#d4b84a", fontSize: 14, fontFamily: "'DM Sans', sans-serif", fontWeight: 700, transition: "background 0.2s", letterSpacing: 1 },
-  toast: { position: "fixed", top: "45%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(74,139,63,0.95)", color: "#fff", padding: "14px 36px", borderRadius: 14, zIndex: 500, textAlign: "center", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", animation: "toastIn 2.2s ease-in-out forwards" },
+  toast: { position: "fixed", top: "45%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(74,139,63,0.95)", color: "#fff", padding: "14px 36px", borderRadius: 14, zIndex: 1100, textAlign: "center", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", animation: "toastIn 2.2s ease-in-out forwards" },
   toastWord: { fontSize: 22, fontWeight: 700, fontFamily: "'Cormorant Garamond', serif", letterSpacing: 2 },
   toastTr: { fontSize: 14, opacity: 0.85, fontStyle: "italic", fontFamily: "'DM Sans', sans-serif", marginTop: 2 },
   chips: { display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", maxWidth: 340, marginBottom: 14 },
