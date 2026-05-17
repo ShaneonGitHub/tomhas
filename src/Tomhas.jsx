@@ -809,7 +809,7 @@ export default function Tomhas() {
               onClick={won ? start : retry}
               style={{ ...S.modalBtn, background: won ? "#4a8b3f" : count >= 2 ? "#b8942e" : "#d94444" }}
             >
-              {won ? "ARÍS!" : "TRIAIL ARÍS"}
+              {won ? "CLUICHE EILE" : "TRIAIL ARÍS"}
             </button>
           </div>
         </div>
