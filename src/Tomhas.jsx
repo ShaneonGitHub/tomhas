@@ -408,7 +408,30 @@ export default function Tomhas() {
     setGrid(scr);
     setOptimal(opt);
     setSel(null);
-    setSwaps(opt + 5);
+    setSwaps(opt + 7);
+    setDone(new Set());
+    setHints(3);
+    setToast(null);
+    setWon(false);
+    setLost(false);
+    setBump(new Set());
+    dragRef.current = null;
+    setGhostPos(null);
+    setDropCell(null);
+  }, []);
+
+  // Retry the same puzzle with a fresh scramble
+  const retry = useCallback(() => {
+    const { puz: p } = R.current;
+    if (!p) return;
+    const s = buildSol(p);
+    const scr = scramble(s);
+    const opt = calcMinSwaps(scr, s);
+    setSol(s);
+    setGrid(scr);
+    setOptimal(opt);
+    setSel(null);
+    setSwaps(opt + 7);
     setDone(new Set());
     setHints(3);
     setToast(null);
@@ -424,8 +447,8 @@ export default function Tomhas() {
 
   // #3: Fixed hint - properly swaps letters instead of creating from thin air
   const handleHint = useCallback(() => {
-    const { grid: g, sol: s, puz: p, done: d, won: w, lost: l, hints: h } = R.current;
-    if (w || l || !g || !s || h <= 0) return;
+    const { grid: g, sol: s, puz: p, done: d, won: w, lost: l, hints: h, swaps: sw } = R.current;
+    if (w || l || !g || !s || h <= 0 || sw <= 0) return;
     const wrong = [];
     for (let r = 0; r < 5; r++)
       for (let c = 0; c < 5; c++)
@@ -457,6 +480,8 @@ export default function Tomhas() {
     setGrid(ng);
     setSel(null);
     setHints(h - 1);
+    const ns = sw - 1;
+    setSwaps(ns);
     setTimeout(() => checkWords(ng, s, p, d), 30);
   }, [checkWords]);
 
@@ -781,7 +806,7 @@ export default function Tomhas() {
             </div>
 
             <button
-              onClick={start}
+              onClick={won ? start : retry}
               style={{ ...S.modalBtn, background: won ? "#4a8b3f" : count >= 2 ? "#b8942e" : "#d94444" }}
             >
               {won ? "ARÍS!" : "TRIAIL ARÍS"}
