@@ -153,14 +153,34 @@ function buildSol(p) {
 
 function scramble(sol) {
   const g = sol.map(r => [...r]);
-  const pos = [];
-  const lets = [];
+  const allPos = [];
+  const allLets = [];
   for (let r = 0; r < 5; r++)
     for (let c = 0; c < 5; c++)
       if (isActive(r, c) && g[r][c] && g[r][c] !== BLANK) {
-        pos.push([r, c]);
-        lets.push(g[r][c]);
+        allPos.push([r, c]);
+        allLets.push(g[r][c]);
       }
+
+  // Pick 2 random positions to keep correct (green from the start)
+  const keepIndices = new Set();
+  const shuffledIndices = Array.from({ length: allPos.length }, (_, i) => i).sort(() => Math.random() - 0.5);
+  for (const idx of shuffledIndices) {
+    if (keepIndices.size >= 2) break;
+    keepIndices.add(idx);
+  }
+
+  // Collect the positions and letters that will be scrambled
+  const pos = [];
+  const lets = [];
+  for (let i = 0; i < allPos.length; i++) {
+    if (!keepIndices.has(i)) {
+      pos.push(allPos[i]);
+      lets.push(allLets[i]);
+    }
+  }
+
+  // Scramble only the non-kept letters, ensuring none land in their correct spot
   let best = [...lets];
   let bestS = 0;
   for (let a = 0; a < 500; a++) {
@@ -171,7 +191,7 @@ function scramble(sol) {
     }
     const s = sh.filter((ch, i) => !eq(ch, lets[i])).length;
     if (s > bestS) { best = sh; bestS = s; }
-    if (s >= lets.length - 2) break; // #5: exit earlier
+    if (s >= lets.length - 1) break;
   }
   pos.forEach(([r, c], i) => { g[r][c] = best[i]; });
   return g;
